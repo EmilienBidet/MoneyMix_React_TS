@@ -1,0 +1,146 @@
+import { useEffect, useLayoutEffect, useState } from 'react';
+
+import { isEmpty } from 'lodash';
+import useSearchParam from 'auth/hooks/useSearchParam';
+import { appRouteConstants } from 'app/app-route.constant';
+import { Account, SubscriptionDetail } from 'auth/auth.types';
+import { pricingDetailConstant } from 'common/common.constant';
+import { StripeSubscriptionStatus } from 'setting/setting.enum';
+import { useAuthDispatch, useAuthState } from 'auth/auth.context';
+import { getCurrentSubscription, getSubscription } from 'api/request.api';
+import { setCurSubscription, setSubscriptionDetail } from 'auth/auth.actions';
+
+const useSubscriptionValidation = () => {
+  const { currentSubscription, subscriptionDetail, onboarded, accounts } = useAuthState();
+  const dispatch = useAuthDispatch();
+  const from = useSearchParam('from');
+  const [loading, setLoading] = useState<boolean>(false);
+  const [accessibleRoute, setAccessibleRoutes] = useState('');
+
+  const subStatus = currentSubscription?.subscriptionStatus;
+  const hasAllValues = [currentSubscription, subscriptionDetail].every((item) => !isEmpty(item));
+
+  const active = StripeSubscriptionStatus.ACTIVE;
+  const unpaid = StripeSubscriptionStatus.UNPAID;
+  const canceled = StripeSubscriptionStatus.CANCELED;
+  const trialing = StripeSubscriptionStatus.TRIALING;
+  const pastDue = StripeSubscriptionStatus.PAST_DUE;
+  const incomplete = StripeSubscriptionStatus.INCOMPLETE;
+  const incompleteExpired = StripeSubscriptionStatus.INCOMPLETE_EXPIRED;
+  const isPlanExist = subStatus === active || subStatus === trialing;
+  const isPlanExpired = subStatus === canceled || subStatus === unpaid || subStatus === pastDue || subStatus === incomplete || subStatus === incompleteExpired;
+
+  const existingManualAccounts = accounts?.filter((account: Account) => account.isManual).length || 0;
+  const existingAutoAccounts = accounts?.filter((account: Account) => !account.isManual).length || 0;
+  const numberOfConnectedAccountOnPlan = subscriptionDetail?.details?.[pricingDetailConstant.CONNECTED_ACCOUNT] || '0';
+  const numberOfManualAccountOnPlan = subscriptionDetail?.details?.[pricingDetailConstant.MANUAL_ACCOUNT] || '0';
+  const hasUnlimitedConnectedAccount = numberOfConnectedAccountOnPlan.toUpperCase() === 'UNLIMITED';
+  const hasUnlimitedManualAccount = numberOfManualAccountOnPlan.toUpperCase() === 'UNLIMITED';
+  const isAccountEmpty = accounts && accounts.length <= 0;
+
+  const checkPlanExceeds = () => {
+    if (hasUnlimitedConnectedAccount && hasUnlimitedManualAccount) {
+      return false;
+    }
+
+    if (
+      existingAutoAccounts > +numberOfConnectedAccountOnPlan ||
+      existingManualAccounts > +numberOfManualAccountOnPlan
+    ) {
+      return true;
+    }
+
+    return false;
+  };
+
+  const isPlanExceeds = checkPlanExceeds();
+
+  const hasSubscriptionDetail = !isEmpty(subscriptionDetail);
+  const hasCurrentSubscription = !isEmpty(currentSubscription);
+
+  /**
+   * Get current subscription @if current subscription not available
+   * Get subscription detail @if subscription detail is not available
+   */
+  useEffect(() => {
+    (async () => {
+      let priceId: string = '';
+      if (!hasCurrentSubscription) {
+        setLoading(true);
+        const { data, error } = await getCurrentSubscription();
+        setLoading(false);
+        if (!error || data) {
+          priceId = data?.priceId;
+          dispatch(setCurSubscription(data));
+        }
+      }
+      if (!hasSubscriptionDetail && priceId) {
+        setLoading(true);
+        const { data, error } = await getSubscription({ priceId });
+        setLoading(false);
+        if (!error || data) {
+          const subDetail: SubscriptionDetail = data;
+          dispatch(setSubscriptionDetail(subDetail));
+        }
+      }
+    })();
+  }, [hasCurrentSubscription, hasSubscriptionDetail, dispatch]);
+
+  useLayoutEffect(() => {
+    let route: string = '';
+    (() => {
+      if (!onboarded) {
+        route = appRouteConstants.auth.CONNECT_ACCOUNT;
+      }
+
+      if (from === 'accountSettings') {
+        route = 'all';
+      }
+
+      if (hasAllValues && !loading) {
+        if (isPlanExpired) {
+          route = appRouteConstants.subscription.SUBSCRIPTION;
+        } else if (isAccountEmpty) {
+          route = appRouteConstants.auth.CONNECT_ACCOUNT;
+
+          return route;
+        }
+
+        if (isPlanExpired) {
+          route = appRouteConstants.subscription.SUBSCRIPTION;
+
+          return route;
+        }
+
+        if (isPlanExist) {
+          if (isPlanExceeds) {
+            route = appRouteConstants.subscription.REVIEW;
+
+            return route;
+          }
+        }
+
+        // todo: fix this as visited net-worth for the first time sets onboarded to true.
+        // also onboarded is only detected after first logout as is in JWT. The registration based session becomes corrupted due to this.
+        if (isPlanExist && (onboarded || from === 'accountSettings') && !isPlanExceeds && !isAccountEmpty) {
+          route = 'all';
+
+          return route;
+        }
+
+        route = appRouteConstants.auth.CONNECT_ACCOUNT;
+
+        return route;
+      }
+    })();
+
+    setAccessibleRoutes(route);
+  }, [isPlanExpired, isPlanExist, onboarded, isPlanExceeds, hasAllValues, loading, from, isAccountEmpty]);
+
+  return {
+    loading,
+    accessibleRoute,
+  };
+};
+
+export default useSubscriptionValidation;
